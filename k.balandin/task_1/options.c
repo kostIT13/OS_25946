@@ -1,229 +1,169 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <sys/resource.h>
 #include <string.h>
 #include <errno.h>
 #include <limits.h>
-#include <sys/resource.h>
-#include <sys/types.h>
 
-extern char **environ;
-
-typedef enum {
-    ACT_I,   
-    ACT_S,   
-    ACT_P,   
-    ACT_U, 
-    ACT_U_SET, 
-    ACT_C,  
-    ACT_C_SET, 
-    ACT_D,  
-    ACT_V,   
-    ACT_V_SET  
-} action_type;
-
+// Структура для хранения опции и её аргумента
 typedef struct {
-    action_type type;
-    char *arg;   
-} action_t;
+    char opt;
+    char *arg;
+} Action;
 
-static action_t *actions = NULL;
-static size_t actions_count = 0;
-static size_t actions_cap = 0;
-
-static void push_action(action_type t, const char *arg)
-{
-    if (actions_count == actions_cap) {
-        actions_cap = actions_cap ? actions_cap * 2 : 16;
-        actions = realloc(actions, actions_cap * sizeof(*actions));
-        if (!actions) {
-            perror("realloc");
-            exit(EXIT_FAILURE);
-        }
-    }
-    actions[actions_count].type = t;
-    actions[actions_count].arg = arg ? strdup(arg) : NULL;
-    actions_count++;
-}
-
-
-static void do_i(void)
-{
-    printf("-i: real UID=%ld, effective UID=%ld, real GID=%ld, effective GID=%ld\n",
-           (long)getuid(), (long)geteuid(),
-           (long)getgid(), (long)getegid());
-}
-
-static void do_s(void)
-{
-    if (setpgid(0, 0) == -1) {
-        perror("-s: setpgid");
-    } else {
-        printf("-s: process became group leader, PGID=%ld\n", (long)getpgrp());
-    }
-}
-
-static void do_p(void)
-{
-    printf("-p: PID=%ld, PPID=%ld, PGID=%ld\n",
-           (long)getpid(), (long)getppid(), (long)getpgrp());
-}
-
-static void do_u(void)
-{
-    struct rlimit rl;
-    if (getrlimit(RLIMIT_NOFILE, &rl) == -1) {
-        perror("-u: getrlimit");
-        return;
-    }
-    printf("-u: ulimit (RLIMIT_NOFILE) soft=%llu hard=%llu\n",
-           (unsigned long long)rl.rlim_cur,
-           (unsigned long long)rl.rlim_max);
-}
-
-static void do_U(const char *arg)
-{
-    char *end = NULL;
-    errno = 0;
-    long val = strtol(arg, &end, 10);
-    if (errno != 0 || end == arg || *end != '\0' || val < 0) {
-        fprintf(stderr, "-U: invalid value '%s'\n", arg);
-        return;
-    }
-    struct rlimit rl;
-    if (getrlimit(RLIMIT_NOFILE, &rl) == -1) {
-        perror("-U: getrlimit");
-        return;
-    }
-    rl.rlim_cur = (rlim_t)val;
-    if (rl.rlim_max != RLIM_INFINITY && rl.rlim_cur > rl.rlim_max)
-        rl.rlim_max = rl.rlim_cur;
-    if (setrlimit(RLIMIT_NOFILE, &rl) == -1) {
-        perror("-U: setrlimit");
-        return;
-    }
-    printf("-U: ulimit set to %ld\n", val);
-}
-
-static void do_c(void)
-{
-    struct rlimit rl;
-    if (getrlimit(RLIMIT_CORE, &rl) == -1) {
-        perror("-c: getrlimit");
-        return;
-    }
-    printf("-c: core file size soft=%llu hard=%llu bytes\n",
-           (unsigned long long)rl.rlim_cur,
-           (unsigned long long)rl.rlim_max);
-}
-
-static void do_C(const char *arg)
-{
-    char *end = NULL;
-    errno = 0;
-    long val = strtol(arg, &end, 10);
-    if (errno != 0 || end == arg || *end != '\0' || val < 0) {
-        fprintf(stderr, "-C: invalid value '%s'\n", arg);
-        return;
-    }
-    struct rlimit rl;
-    if (getrlimit(RLIMIT_CORE, &rl) == -1) {
-        perror("-C: getrlimit");
-        return;
-    }
-    rl.rlim_cur = (rlim_t)val;
-    if (rl.rlim_max != RLIM_INFINITY && rl.rlim_cur > rl.rlim_max)
-        rl.rlim_max = rl.rlim_cur;
-    if (setrlimit(RLIMIT_CORE, &rl) == -1) {
-        perror("-C: setrlimit");
-        return;
-    }
-    printf("-C: core file size set to %ld bytes\n", val);
-}
-
-static void do_d(void)
-{
-    char buf[PATH_MAX];
-    if (getcwd(buf, sizeof(buf)) == NULL) {
-        perror("-d: getcwd");
-        return;
-    }
-    printf("-d: cwd=%s\n", buf);
-}
-
-static void do_v(void)
-{
-    printf("-v: environment variables:\n");
-    for (char **e = environ; *e; e++)
-        printf("    %s\n", *e);
-}
-
-static void do_V(const char *arg)
-{
-    if (strchr(arg, '=') == NULL) {
-        fprintf(stderr, "-V: argument must be NAME=value, got '%s'\n", arg);
-        return;
-    }
-    if (putenv(strdup(arg)) != 0) {
-        perror("-V: putenv");
-        return;
-    }
-    printf("-V: set %s\n", arg);
-}
-
-
-static void run_actions(void)
-{
-    for (size_t i = actions_count; i-- > 0; ) {
-        action_t *a = &actions[i];
-        switch (a->type) {
-        case ACT_I:     do_i();        break;
-        case ACT_S:     do_s();        break;
-        case ACT_P:     do_p();        break;
-        case ACT_U:     do_u();        break;
-        case ACT_U_SET: do_U(a->arg);  break;
-        case ACT_C:     do_c();        break;
-        case ACT_C_SET: do_C(a->arg);  break;
-        case ACT_D:     do_d();        break;
-        case ACT_V:     do_v();        break;
-        case ACT_V_SET: do_V(a->arg);  break;
-        }
-    }
-}
-
-
-int main(int argc, char *argv[])
-{
-    const char *optstring = "ispuU:cC:dvV:";
+int main(int argc, char *argv[]) {
+    // Массив для хранения опций. Максимальный размер равен argc
+    Action actions[argc];
+    int action_count = 0;
     int c;
+    
+    // Строка опций для getopt: 
+    // i, s, p, u, c, d, v - без аргументов
+    // U:, C:, V: - с обязательным аргументом
+    char *optstring = "ispuU:cC:dvV:";
 
+    // Разрешаем getopt выводить сообщения об ошибках для неверных опций
+    opterr = 1;
+
+    // 1. Парсинг аргументов (getopt всегда идет слева направо)
     while ((c = getopt(argc, argv, optstring)) != -1) {
-        switch (c) {
-        case 'i': push_action(ACT_I, NULL);      break;
-        case 's': push_action(ACT_S, NULL);      break;
-        case 'p': push_action(ACT_P, NULL);      break;
-        case 'u': push_action(ACT_U, NULL);      break;
-        case 'U': push_action(ACT_U_SET, optarg); break;
-        case 'c': push_action(ACT_C, NULL);      break;
-        case 'C': push_action(ACT_C_SET, optarg); break;
-        case 'd': push_action(ACT_D, NULL);      break;
-        case 'v': push_action(ACT_V, NULL);      break;
-        case 'V': push_action(ACT_V_SET, optarg); break;
-        case '?':
-        default:
-            if (optopt)
-                fprintf(stderr, "Invalid option: -%c\n", optopt);
-            else
-                fprintf(stderr, "Invalid option: %s\n", argv[optind - 1]);
-            break;
-        }
+        actions[action_count].opt = c;
+        actions[action_count].arg = optarg;
+        action_count++;
     }
 
-    run_actions();
-
-    for (size_t i = 0; i < actions_count; i++)
-        free(actions[i].arg);
-    free(actions);
+    // 2. Обработка опций СПРАВА НАЛЕВО (обратный цикл)
+    for (int i = action_count - 1; i >= 0; i--) {
+        switch (actions[i].opt) {
+            case 'i': {
+                printf("Real UID: %d, Effective UID: %d\n", getuid(), geteuid());
+                printf("Real GID: %d, Effective GID: %d\n", getgid(), getegid());
+                break;
+            }
+            case 's': {
+                // 0, 0 означает: текущий процесс, и новый PGID равен текущему PID
+                if (setpgid(0, 0) == -1) {
+                    perror("Ошибка setpgid");
+                } else {
+                    printf("Процесс стал лидером группы процессов (PGID: %d)\n", getpgrp());
+                }
+                break;
+            }
+            case 'p': {
+                printf("PID: %d, PPID: %d, PGID: %d\n", getpid(), getppid(), getpgrp());
+                break;
+            }
+            case 'u': {
+                struct rlimit rl;
+                if (getrlimit(RLIMIT_NOFILE, &rl) == 0) {
+                    printf("Текущий ulimit (RLIMIT_NOFILE): soft=%lld, hard=%lld\n", 
+                           (long long)rl.rlim_cur, (long long)rl.rlim_max);
+                } else {
+                    perror("Ошибка getrlimit");
+                }
+                break;
+            }
+            case 'U': {
+                char *endptr;
+                errno = 0;
+                long new_limit = strtol(actions[i].arg, &endptr, 10);
+                
+                // Проверка на ошибки преобразования: errno, остаток строки, отрицательное значение
+                if (errno != 0 || *endptr != '\0' || new_limit < 0) {
+                    fprintf(stderr, "Ошибка: некорректное значение для -U: '%s'\n", actions[i].arg);
+                } else {
+                    struct rlimit rl;
+                    if (getrlimit(RLIMIT_NOFILE, &rl) == 0) {
+                        rl.rlim_cur = (rlim_t)new_limit;
+                        if (new_limit > rl.rlim_max) {
+                            rl.rlim_max = (rlim_t)new_limit;
+                        }
+                        if (setrlimit(RLIMIT_NOFILE, &rl) == 0) {
+                            printf("ulimit успешно изменен на %ld\n", new_limit);
+                        } else {
+                            perror("Ошибка setrlimit");
+                        }
+                    }
+                }
+                break;
+            }
+            case 'c': {
+                struct rlimit rl;
+                if (getrlimit(RLIMIT_CORE, &rl) == 0) {
+                    printf("Размер core-файла (soft): %lld байт, (hard): %lld байт\n", 
+                           (long long)rl.rlim_cur, (long long)rl.rlim_max);
+                } else {
+                    perror("Ошибка getrlimit (core)");
+                }
+                break;
+            }
+            case 'C': {
+                char *endptr;
+                errno = 0;
+                long new_core_size = strtol(actions[i].arg, &endptr, 10);
+                
+                if (errno != 0 || *endptr != '\0' || new_core_size < 0) {
+                    fprintf(stderr, "Ошибка: некорректное значение для -C: '%s'\n", actions[i].arg);
+                } else {
+                    struct rlimit rl;
+                    if (getrlimit(RLIMIT_CORE, &rl) == 0) {
+                        rl.rlim_cur = (rlim_t)new_core_size;
+                        // Не превышаем hard limit, если новое значение больше его
+                        if (new_core_size > rl.rlim_max) {
+                            rl.rlim_max = (rlim_t)new_core_size;
+                        }
+                        if (setrlimit(RLIMIT_CORE, &rl) == 0) {
+                            printf("Размер core-файла успешно изменен на %ld байт\n", new_core_size);
+                        } else {
+                            perror("Ошибка setrlimit (core)");
+                        }
+                    }
+                }
+                break;
+            }
+            case 'd': {
+                char cwd[PATH_MAX];
+                if (getcwd(cwd, sizeof(cwd)) != NULL) {
+                    printf("Текущая рабочая директория: %s\n", cwd);
+                } else {
+                    perror("Ошибка getcwd");
+                }
+                break;
+            }
+            case 'v': {
+                extern char **environ;
+                printf("--- Переменные окружения ---\n");
+                for (char **env = environ; *env != NULL; env++) {
+                    printf("%s\n", *env);
+                }
+                printf("----------------------------\n");
+                break;
+            }
+            case 'V': {
+                // Ожидаемый формат: "name=value"
+                char *eq = strchr(actions[i].arg, '=');
+                if (eq != NULL) {
+                    *eq = '\0'; // Временно разрываем строку на имя и значение
+                    char *name = actions[i].arg;
+                    char *value = eq + 1;
+                    
+                    if (setenv(name, value, 1) == 0) {
+                        printf("Переменная окружения установлена: %s=%s\n", name, value);
+                    } else {
+                        perror("Ошибка setenv");
+                    }
+                } else {
+                    fprintf(stderr, "Ошибка: неверный формат для -V, ожидается 'name=value'\n");
+                }
+                break;
+            }
+            case '?':
+                // getopt уже вывел сообщение об ошибке в stderr, 
+                // здесь мы просто игнорируем дальнейшую обработку этой "опции"
+                break;
+        }
+    }
 
     return 0;
 }
